@@ -41,6 +41,7 @@ function okta_sso_show() {
         'client_id' => $oktaSsoSettings['client_id'],
         'redirect_uri' => $oktaSsoSettings['redirect_uri'],
         'state' => $_SESSION['okta_sso_state'],
+        'scope' => 'openid',
       ]);
     
       $html = "<a href=\"$loginURL\">Log in</a>";
@@ -62,7 +63,7 @@ function okta_sso_check_settings() {
 \$conf['okta_sso_settings'] = [
   'client_id' => 'SEE-YOUR-OKTA-DASHBOARD',
   'client_secret' => 'SEE-YOUR-OKTA-DASHBOARD',
-  'redirect_url' => 'https://YOUR-SITE/okta_sso',
+  'redirect_uri' => 'https://YOUR-SITE/okta_sso',
 ];
       </pre>";
     throw new Exception($msg);
@@ -75,7 +76,12 @@ function okta_sso_callback() {
   try {
     // make sure we have a code in the query string
     if (!isset($_GET['code'])) {
-      throw new Exception('Missing code');
+      if (isset($_GET['error_description'])) {
+        throw new Exception($_GET['error_description']);
+      }
+      else {
+        throw new Exception('Missing code');
+      }
     }
 
     // make sure the state matches
@@ -109,24 +115,40 @@ function okta_sso_callback() {
       // see if we know this user in Drupal
       $tmpuser = user_load_by_name($token->username);
       if ($tmpuser === FALSE) {
+        // no luck by name, try email
+        $tmpuser = user_load_by_mail($token->username);
+      }
+
+      if ($tmpuser === FALSE) {
         throw new Exception('There is no account for ' . $token->username);
       }
 
       // make sure the user is active
-      if ($tmpuser->is_active != -1) {
+      if ($tmpuser->status != "1") {
         throw new Exception('The user ' . $token->username . ' is blocked');
       }
 
       // we're all set, log in the user
       global $user;
       $user = user_load($tmpuser->uid);
-      user_login_finalize(['name' => $user->name]);
+      $params = ['name' => $user->name];
+      user_login_finalize($params);
       return '<p>You are logged in</p>';
     }
 
   }
   catch (Exception $e) {
     return '<p>' . $e->getMessage() . '</p>';
+  }
+}
+
+function okta_sso_form_alter(&$form, &$form_state, $form_id) {
+  if ($form_id == 'user_login' || $form_id == 'user_pass') {
+    // see if we have to disable the standard Drupal login form
+    $oktaSsoSettings = okta_sso_check_settings();
+    if ($oktaSsoSettings['disable_login'] == TRUE) {
+      $form['#access'] = FALSE;
+    }
   }
 }
 
