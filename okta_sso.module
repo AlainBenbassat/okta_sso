@@ -61,9 +61,11 @@ function okta_sso_check_settings() {
     $msg = "Please add the following code in your settings.php file.<br>
       <pre>
 \$conf['okta_sso_settings'] = [
+  'disable_login' => TRUE,
   'client_id' => 'SEE-YOUR-OKTA-DASHBOARD',
   'client_secret' => 'SEE-YOUR-OKTA-DASHBOARD',
   'redirect_uri' => 'https://YOUR-SITE/okta_sso',
+  'metadata_uri' => 'SEE-YOUR-OKTA-DASHBOARD',
 ];
       </pre>";
     throw new Exception($msg);
