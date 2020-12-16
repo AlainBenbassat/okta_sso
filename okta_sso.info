@@ -1,0 +1,9 @@
+; $Id$
+  
+name = okta_sso
+description = Sign in with Okta
+package = Okta
+core = 7.x
+
+files[] = okta_sso.module
+
