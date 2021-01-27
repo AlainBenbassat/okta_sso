@@ -5,46 +5,34 @@ function okta_sso_menu() {
 
   $items['okta_sso'] = [
     'title'            => t('Okta SSO'),
-    'page callback'    => 'okta_sso_show',
+    'page callback'    => 'okta_sso_login',
     'access arguments' => ['access content'],
     'description' => t('Okta SSO'),
     'type' => MENU_CALLBACK,
   ];
 
   $items['okta_sso_callback'] = [
-    'title'            => t('Okta SSO Callback'),
-    'page callback'    => 'okta_sso_callback',
+    'title'            => t('Okta SSO OAuth Callback'),
+    'page callback'    => 'okta_sso_oauth_callback',
     'access arguments' => ['access content'],
-    'description' => t('Okta SSO Callback'),
+    'description' => t('Okta SSO OAuth Callback'),
     'type' => MENU_CALLBACK,
   ];
 
   return $items;
 }
 
-function okta_sso_show() {
-  global $user;
-  $html = '<p>You are logged in</p>';
+function okta_sso_login() {
+  $html = '';
 
   try {
-    if (!$user->uid) {
-      // get the okta settings
-      $oktaSsoSettings = okta_sso_check_settings();
-
-      // get the meta data
-      $metadata = okta_sso_http($oktaSsoSettings['metadata_uri']);
-
-      // generate the login url
-      $_SESSION['okta_sso_state'] = bin2hex(random_bytes(5));
-      $loginURL = $metadata->authorization_endpoint . '?' . http_build_query([
-        'response_type' => 'code',
-        'client_id' => $oktaSsoSettings['client_id'],
-        'redirect_uri' => $oktaSsoSettings['redirect_uri'],
-        'state' => $_SESSION['okta_sso_state'],
-        'scope' => 'openid',
-      ]);
-    
-      $html = "<a href=\"$loginURL\">Log in</a>";
+    if (OktaSsoDrupal::isUserLoggedIn()) {
+      $html = '<p>You are logged in</p>';
+    }
+    else {
+      $oktaSsoSettings = new OktaSsoSettings();
+      $oktaAuthenticator = OktaSsoFactory::getAuthenticator($oktaSsoSettings);
+      $html = '<p><a href="' . $oktaAuthenticator->getLoginUrl() . '">Log in</a></p>';
     }
   }
   catch (Exception $e) {
@@ -54,90 +42,19 @@ function okta_sso_show() {
   return $html;
 }
 
-function okta_sso_check_settings() {
-  $oktaSsoSettings = variable_get('okta_sso_settings');
-
-  if (!$oktaSsoSettings) {
-    $msg = "Please add the following code in your settings.php file.<br>
-      <pre>
-\$conf['okta_sso_settings'] = [
-  'disable_login' => TRUE,
-  'client_id' => 'SEE-YOUR-OKTA-DASHBOARD',
-  'client_secret' => 'SEE-YOUR-OKTA-DASHBOARD',
-  'redirect_uri' => 'https://YOUR-SITE/okta_sso',
-  'metadata_uri' => 'SEE-YOUR-OKTA-DASHBOARD',
-];
-      </pre>";
-    throw new Exception($msg);
-  }
-  
-  return $oktaSsoSettings;
-}
-
-function okta_sso_callback() {
+function okta_sso_oauth_callback() {
   try {
-    // make sure we have a code in the query string
-    if (!isset($_GET['code'])) {
-      if (isset($_GET['error_description'])) {
-        throw new Exception($_GET['error_description']);
-      }
-      else {
-        throw new Exception('Missing code');
-      }
-    }
+    $code = okta_sso_oauth_getCode();
+    okta_sso_oauth_assertMatchingState();
 
-    // make sure the state matches
-    if ($_SESSION['okta_sso_state'] != $_GET['state']) {
-      throw new Exception('Bad state');
-    }
+    $oktaSsoSettings = new OktaSsoSettings();
+    $oktaSsoOauth = new OktaSsoOauth($oktaSsoSettings);
+    $userName = $oktaSsoOauth->validate($code);
 
-    // get the okta settings
-    $oktaSsoSettings = okta_sso_check_settings();
+    $user = OktaSsoDrupal::loadUserByName($userName);
+    OktaSsoDrupal::loginUser($user);
 
-    // get the meta data
-    $metadata = okta_sso_http($oktaSsoSettings['metadata_uri']);
-
-    // exchange the code for an access token
-    $response = okta_sso_http($metadata->token_endpoint, [
-      'code' => $_GET['code'],
-      'grant_type' => 'authorization_code',
-      'client_id' => $oktaSsoSettings['client_id'],
-      'client_secret' => $oktaSsoSettings['client_secret'],
-      'redirect_uri' => $oktaSsoSettings['redirect_uri'],
-    ]);
-
-    // get the user info
-    $token = okta_sso_http($metadata->introspection_endpoint, [
-      'client_id' => $oktaSsoSettings['client_id'],
-      'client_secret' => $oktaSsoSettings['client_secret'],
-      'token' => $response->access_token,
-    ]);
-
-    if ($token->active) {
-      // see if we know this user in Drupal
-      $tmpuser = user_load_by_name($token->username);
-      if ($tmpuser === FALSE) {
-        // no luck by name, try email
-        $tmpuser = user_load_by_mail($token->username);
-      }
-
-      if ($tmpuser === FALSE) {
-        throw new Exception('There is no account for ' . $token->username);
-      }
-
-      // make sure the user is active
-      if ($tmpuser->status != "1") {
-        throw new Exception('The user ' . $token->username . ' is blocked');
-      }
-
-      // we're all set, log in the user
-      global $user;
-      $user = user_load($tmpuser->uid);
-      $params = ['name' => $user->name];
-      user_login_finalize($params);
-      return '<p>You are logged in</p>';
-    }
-
+    return "<p>Hello $userName. You are logged in.</p>";
   }
   catch (Exception $e) {
     return '<p>' . $e->getMessage() . '</p>';
@@ -145,22 +62,37 @@ function okta_sso_callback() {
 }
 
 function okta_sso_form_alter(&$form, &$form_state, $form_id) {
-  if ($form_id == 'user_login' || $form_id == 'user_pass') {
-    // see if we have to disable the standard Drupal login form
-    $oktaSsoSettings = okta_sso_check_settings();
-    if ($oktaSsoSettings['disable_login'] == TRUE) {
-      $form['#access'] = FALSE;
+  try {
+    if ($form_id == 'user_login' || $form_id == 'user_pass') {
+      $oktaSsoSettings = new OktaSsoSettings();
+      if ($oktaSsoSettings->disableLogin) {
+        $form['#access'] = FALSE;
+      }
     }
   }
+  catch (Exception $e) {
+    drupal_set_message($e->getMessage(), 'error');
+  }
 }
 
-function okta_sso_http($url, $params = FALSE) {
-  $ch = curl_init($url);
-  curl_setopt($ch, CURLOPT_RETURNTRANSFER, TRUE);
-  if ($params) {
-    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($params));
+function okta_sso_oauth_getCode() {
+  if (!isset($_GET['code'])) {
+    if (isset($_GET['error_description'])) {
+      throw new Exception($_GET['error_description']);
+    }
+    else {
+      throw new Exception('Missing code');
+    }
   }
 
-  return json_decode(curl_exec($ch));
+  return $_GET['code'];
 }
+
+function okta_sso_oauth_assertMatchingState() {
+  if ($_SESSION['okta_sso_state'] != $_GET['state']) {
+    throw new Exception('Bad state');
+  }
+}
+
+
 

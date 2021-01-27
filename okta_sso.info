@@ -1,9 +1,13 @@
 ; $Id$
-  
+
 name = okta_sso
 description = Sign in with Okta
 package = Okta
 core = 7.x
 
-files[] = okta_sso.module
-
+files[] = includes/okta_sso_connection.inc
+files[] = includes/okta_sso_drupal.inc
+files[] = includes/okta_sso_factory.inc
+files[] = includes/okta_sso_oauth.inc
+files[] = includes/okta_sso_saml.inc
+files[] = includes/okta_sso_settings.inc
